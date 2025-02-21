@@ -1,0 +1,149 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-master
+  template:
+    metadata:
+      labels:
+        app: spark-master
+    spec:
+      hostname: spark-master
+      securityContext:
+        runAsUser: 50000
+      containers:
+        - name: spark-master
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 7077
+              name: master-port
+            - containerPort: 8080
+              name: master-ui
+            - containerPort: 4040
+              name: app-ui-1
+            - containerPort: 4041
+              name: app-ui-2
+            - containerPort: 4042
+              name: app-ui-3
+            - containerPort: 4043
+              name: app-ui-4
+            - containerPort: 4044
+              name: app-ui-5
+            - containerPort: 4045
+              name: app-ui-6
+          env:
+            - name: SPARK_MODE
+              value: master
+            - name: SPARK_LOG_DIR
+              value: /opt/spark/logs
+          envFrom:
+            - configMapRef:
+                name: hadoop-env
+          volumeMounts:
+            - name: spark-logs
+              mountPath: /opt/spark/logs
+            - name: spark-config
+              mountPath: /opt/spark/conf
+          command: ["/bin/bash"]
+          args:
+          - "-c"
+          - |
+            rm -f /opt/spark/logs/* &&
+            SPARK_MASTER_HOST=spark-master \
+            SPARK_MASTER_PORT=7077 \
+            SPARK_MASTER_WEBUI_PORT=8080 \
+            /opt/spark/sbin/start-master.sh &&
+            tail -f /opt/spark/logs/*
+          livenessProbe:
+            exec:
+              command:
+                - nc
+                - -z
+                - localhost
+                - "7077"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - nc
+                - -z
+                - localhost
+                - "7077"
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: spark-logs
+          persistentVolumeClaim:
+            claimName: spark-logs
+        - name: spark-config
+          configMap:
+            name: spark-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-worker
+  template:
+    metadata:
+      labels:
+        app: spark-worker
+    spec:
+      hostname: spark-worker
+      securityContext:
+        runAsUser: 50000 
+      containers:
+        - name: spark-worker
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8083  # Worker UI port
+            - containerPort: 8082  # Worker port
+          env:
+            - name: SPARK_WORKER_CORES
+              value: "2"
+            - name: SPARK_WORKER_MEMORY
+              value: "4g"
+            - name: SPARK_LOCAL_HOSTNAME
+              value: "spark-worker"
+            - name: SPARK_LOG_DIR
+              value: /opt/spark/logs
+          volumeMounts:
+            - name: spark-logs
+              mountPath: /opt/spark/logs
+            - name: spark-work-dir
+              mountPath: /opt/spark/work-dir
+            - name: spark-config
+              mountPath: /opt/spark/conf
+          command: ["/bin/bash"]
+          args:
+          - "-c"
+          - |
+            mkdir -p /opt/spark/work-dir &&
+            SPARK_WORKER_PORT=8082 \
+            SPARK_WORKER_WEBUI_PORT=8083 \
+            /opt/spark/sbin/start-worker.sh spark://spark-master:7077 &&
+            tail -f /opt/spark/logs/*
+      volumes:
+        - name: spark-logs
+          persistentVolumeClaim:
+            claimName: spark-logs
+        - name: spark-work-dir
+          emptyDir: {}
+        - name: spark-config
+          configMap:
+            name: spark-config

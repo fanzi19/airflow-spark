@@ -1,0 +1,78 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9'
+    
+    - name: Run Spark Tests
+      run: |
+        pip install pytest pyspark
+        python -m pytest spark/tests/
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v1
+
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v1
+      with:
+        registry: ghcr.io
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Airflow
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        file: docker/Dockerfile.airflow
+        push: true
+        tags: ${{ env.DOCKER_REGISTRY }}/airflow:${{ github.sha }}
+
+    - name: Build and push Spark
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        file: docker/Dockerfile.spark
+        push: true
+        tags: ${{ env.DOCKER_REGISTRY }}/spark:${{ github.sha }}
+
+    - name: Build and push Hadoop
+      uses: docker/build-push-action@v2
+      with:
+        context: .
+        file: docker/Dockerfile.hadoop
+        push: true
+        tags: ${{ env.DOCKER_REGISTRY }}/hadoop:${{ github.sha }}
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up kubectl
+      uses: azure/k8s-set-context@v1
+      with:
+        kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+    - name: Deploy to Kubernetes
+      run: |
+        kubectl apply -k k8s/ -n $K8S_NAMESPACE

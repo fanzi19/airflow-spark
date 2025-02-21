@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-webserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-webserver
+  template:
+    metadata:
+      labels:
+        app: airflow-webserver
+    spec:
+      containers:
+        - name: airflow-webserver
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
+          command: ["/bin/bash"]
+          args:
+            - -c
+            - |
+              airflow db init &&
+              airflow users create -r Admin -u admin -p admin -e admin@example.com -f Admin -l User &&
+              airflow webserver
+          env:
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: LocalExecutor
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              value: postgresql+psycopg2://airflow:airflow@postgres/airflow
+            - name: AIRFLOW__CORE__LOAD_EXAMPLES
+              value: "false"
+            - name: AIRFLOW_CONN_SPARK_DEFAULT
+              value: spark://spark-master:7077
+            - name: SPARK_HOME
+              value: /opt/spark
+          livenessProbe:  
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:  # Added readinessProbe
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+            - name: spark-tests
+              mountPath: /opt/spark/tests
+      volumes:
+        - name: dags
+          hostPath:
+            path: /Users/fanniewang/airflow-etl-project/dags
+        - name: spark-tests
+          hostPath:
+            path: /Users/fanniewang/airflow-etl-project/spark/tests
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-scheduler
+  template:
+    metadata:
+      labels:
+        app: airflow-scheduler
+    spec:
+      containers:
+        - name: airflow-scheduler
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash"]
+          args:
+            - -c
+            - |
+              airflow db upgrade &&
+              airflow scheduler
+          env:
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: LocalExecutor
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              value: postgresql+psycopg2://airflow:airflow@postgres/airflow
+            - name: AIRFLOW__CORE__LOAD_EXAMPLES
+              value: "false"
+            - name: AIRFLOW_CONN_SPARK_DEFAULT
+              value: spark://spark-master:7077
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+            - name: spark-tests
+              mountPath: /opt/spark/tests
+      volumes:
+        - name: dags
+          hostPath:
+            path: /Users/fanniewang/airflow-etl-project/dags
+        - name: spark-tests
+          hostPath:
+            path: /Users/fanniewang/airflow-etl-project/spark/tests

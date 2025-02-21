@@ -1,0 +1,75 @@
+FROM airflow-base:latest
+
+USER root
+
+# Install SSH server and client, and other required dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        openssh-server \
+        openssh-client \
+        netcat-openbsd \
+        curl \
+        sudo \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Hadoop environment variables
+ENV HADOOP_VERSION=3.4.1
+ENV HADOOP_HOME=/opt/hadoop
+ENV PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin
+ENV HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+ENV HDFS_NAMENODE_USER=root
+ENV HDFS_DATANODE_USER=root
+ENV HDFS_SECONDARYNAMENODE_USER=root
+ENV YARN_RESOURCEMANAGER_USER=root
+ENV YARN_NODEMANAGER_USER=root
+
+# Setup SSH
+RUN mkdir -p /var/run/sshd \
+    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config \
+    && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+    && mkdir -p /root/.ssh
+
+# Copy and extract Hadoop
+COPY downloads/hadoop-${HADOOP_VERSION}.tar.gz /tmp/
+RUN tar -xzf /tmp/hadoop-${HADOOP_VERSION}.tar.gz -C /opt/ \
+    && ln -s /opt/hadoop-${HADOOP_VERSION} ${HADOOP_HOME} \
+    && rm /tmp/hadoop-${HADOOP_VERSION}.tar.gz
+
+# Create necessary directories with proper permissions
+RUN mkdir -p $HADOOP_HOME/dfs/name \
+    && mkdir -p $HADOOP_HOME/dfs/data \
+    && mkdir -p $HADOOP_HOME/logs \
+    && chown -R root:root $HADOOP_HOME \
+    && chmod -R 755 $HADOOP_HOME \
+    && chmod 777 $HADOOP_HOME/dfs/data \
+    && chmod 777 $HADOOP_HOME/dfs/name
+
+# Copy Hadoop configuration files
+COPY hadoop/hadoop-config/* $HADOOP_HOME/etc/hadoop/
+
+# Configure Java environment for Hadoop with JDK 17 compatibility flags
+RUN echo "export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh \
+    && echo "export PATH=\$PATH:\$JAVA_HOME/bin" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh \
+    && echo "export HADOOP_CLASSPATH=\$JAVA_HOME/lib/tools.jar:\$HADOOP_CLASSPATH" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh \
+    && echo "export JAVA_OPTS='--add-opens=java.base/java.lang=ALL-UNNAMED \
+    --add-opens=java.base/java.util=ALL-UNNAMED \
+    --add-opens=java.base/java.io=ALL-UNNAMED \
+    --add-opens=java.base/java.nio=ALL-UNNAMED \
+    --add-opens=java.base/java.net=ALL-UNNAMED \
+    --add-opens=java.base/java.util.concurrent=ALL-UNNAMED \
+    --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED \
+    --add-opens=java.base/java.math=ALL-UNNAMED \
+    --add-exports=java.base/sun.nio.ch=ALL-UNNAMED \
+    --add-exports=java.base/sun.security.action=ALL-UNNAMED'" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh
+
+# Add HADOOP_OPTS to enable JDK 17 compatibility
+RUN echo "export HADOOP_OPTS=\"\$HADOOP_OPTS \$JAVA_OPTS\"" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh
+
+# Copy bootstrap script
+COPY hadoop/bootstrap.sh /bootstrap.sh
+RUN chmod +x /bootstrap.sh
+
+EXPOSE 9870 9000 8088 22
+
+ENTRYPOINT ["/bootstrap.sh"]

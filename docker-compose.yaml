@@ -1,0 +1,283 @@
+version: '3'
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - hadoop_network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+
+  airflow-webserver:
+    image: airflow-spark:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.spark
+    ports:
+      - "8080:8080"
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW_CONN_SPARK_DEFAULT=spark://spark-master:7077
+      - SPARK_HOME=/opt/spark
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./spark/tests:/opt/spark/tests
+    networks:
+      - hadoop_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: >
+      /bin/bash -c "
+      airflow db init &&
+      airflow users create -r Admin -u admin -p admin -e admin@example.com -f Admin -l User &&
+      airflow webserver
+      "
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  airflow-scheduler:
+    image: airflow-spark:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.spark
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=false
+      - AIRFLOW_CONN_SPARK_DEFAULT=spark://spark-master:7077
+      - SPARK_HOME=/opt/spark
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./spark/tests:/opt/spark/tests
+    networks:
+      - hadoop_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: >
+      /bin/bash -c "
+      airflow db upgrade &&
+      airflow scheduler
+      "
+
+  namenode:
+    image: airflow-spark:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.spark
+    hostname: namenode
+    user: root
+    env_file:
+      - ./hadoop.env
+    ports:
+      - "9870:9870"  # Hadoop namenode web UI
+      - "9000:9000"  # HDFS
+    volumes:
+      - hadoop_namenode:/opt/hadoop/dfs/name
+      - hadoop_logs:/opt/hadoop/logs
+    networks:
+      - hadoop_network  
+    environment:
+      - SERVICE_TYPE=hadoop
+      - HADOOP_HOME=/opt/hadoop
+      - HDFS_NAMENODE_USER=root
+      - HDFS_DATANODE_USER=root
+      - HDFS_SECONDARYNAMENODE_USER=root
+      - YARN_RESOURCEMANAGER_USER=root
+      - YARN_NODEMANAGER_USER=root
+    command: ["namenode"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  datanode:
+    image: airflow-spark:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.spark
+    hostname: datanode
+    user: root
+    env_file:
+      - ./hadoop.env
+    networks:
+      - hadoop_network
+    volumes:
+      - hadoop_datanode:/opt/hadoop/dfs/data
+    environment:
+      - SERVICE_TYPE=hadoop
+      - HADOOP_HOME=/opt/hadoop
+      - HDFS_NAMENODE_USER=root
+      - HDFS_DATANODE_USER=root
+    command: ["datanode"]
+    depends_on:
+      - namenode
+
+  resourcemanager:
+    image: airflow-spark:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.spark
+    hostname: resourcemanager
+    user: root
+    env_file:
+      - ./hadoop.env
+    ports:
+      - "8088:8088"  # YARN web UI
+    command: ["resourcemanager"]
+    depends_on:
+      - namenode
+    networks:
+      - hadoop_network
+    environment:
+      - SERVICE_TYPE=hadoop
+      - HADOOP_HOME=/opt/hadoop
+      - YARN_RESOURCEMANAGER_USER=root
+      - YARN_NODEMANAGER_USER=root
+
+  nodemanager:
+    image: airflow-spark:latest
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.spark
+    hostname: nodemanager
+    user: root
+    env_file:
+      - ./hadoop.env
+    command: ["nodemanager"]
+    depends_on:
+      - namenode
+      - resourcemanager
+    networks:
+      - hadoop_network
+    environment:
+      - SERVICE_TYPE=hadoop
+      - HADOOP_HOME=/opt/hadoop
+      - YARN_RESOURCEMANAGER_USER=root
+      - YARN_NODEMANAGER_USER=root
+
+  historyserver:
+    image: airflow-spark:latest
+    hostname: historyserver
+    user: root
+    env_file:
+      - ./hadoop.env
+    ports:
+      - "8188:8188"
+    depends_on:
+      - namenode
+      - resourcemanager
+    networks:
+      - hadoop_network
+    environment:
+      - SERVICE_TYPE=hadoop
+      - HADOOP_HOME=/opt/hadoop
+      - YARN_TIMELINE_SERVICE_HOSTNAME=historyserver
+    volumes:
+      - hadoop_historyserver:/opt/hadoop/logs/userlogs
+    command: ["historyserver"]
+  
+  spark-master:
+    image: airflow-spark:latest
+    hostname: spark-master
+    ports:
+      - "8181:8080"
+      - "7077:7077"
+      - "4040-4045:4040-4045"
+    configs:
+      - source: spark_defaults
+        target: /opt/spark/conf/spark-defaults.conf
+      - source: spark_env
+        target: /opt/spark/conf/spark-env.sh
+    environment:
+      - SPARK_MODE=master
+      - SPARK_LOG_DIR=/opt/spark/logs
+    networks:
+      - hadoop_network
+    volumes:
+      - spark_logs:/opt/spark/logs
+      - ./spark/tests:/opt/spark/tests  # Add this line
+      - ./spark/fairscheduler.xml:/opt/spark/conf/fairscheduler.xml
+    user: airflow
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 7077 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    command: |
+      bash -c "
+      rm -f /opt/spark/logs/* &&
+      /opt/spark/sbin/start-master.sh &&
+      tail -f /opt/spark/logs/*"
+
+  spark-worker:
+    image: airflow-spark:latest
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    hostname: spark-worker
+    ports:
+      - "8183:8083"  # Map worker UI port to host
+      - "8082:8082"
+    configs:
+      - source: spark_defaults
+        target: /opt/spark/conf/spark-defaults.conf
+      - source: spark_env
+        target: /opt/spark/conf/spark-env.sh
+    environment:
+      - SPARK_WORKER_CORES=2 
+      - SPARK_WORKER_MEMORY=4g 
+      - SPARK_LOCAL_HOSTNAME=spark-worker
+      - SPARK_LOG_DIR=/opt/spark/logs
+    volumes:
+      - spark_logs:/opt/spark/logs
+      - spark_work_dir:/opt/spark/work-dir
+      - ./spark/tests:/opt/spark/tests  # Add this line
+      - ./spark/fairscheduler.xml:/opt/spark/conf/fairscheduler.xml
+    networks:
+      - hadoop_network
+    user: airflow
+    command: |
+      bash -c '
+      mkdir -p /opt/spark/work-dir && \
+      /opt/spark/sbin/start-worker.sh spark://spark-master:7077 \
+        --webui-port 8083 \
+        --port 8082 \
+        --host spark-worker && \
+      tail -f /opt/spark/logs/*'
+
+configs:
+  spark_defaults:
+    file: ./spark/spark-defaults.conf
+  spark_env:
+    file: ./spark/spark-env.sh
+
+volumes:
+  postgres_data:
+  hadoop_namenode:
+  hadoop_datanode:
+  hadoop_logs:
+  hadoop_historyserver:
+  spark_work_dir:
+  spark_logs:
+
+networks:
+  hadoop_network:
+    driver: bridge

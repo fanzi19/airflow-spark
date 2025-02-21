@@ -1,0 +1,92 @@
+FROM airflow-hadoop:latest
+
+USER root
+
+# Create airflow user and group first
+RUN groupadd -g 50000 airflow || true && \
+    useradd -u 50000 -g airflow -d /home/airflow -m -s /bin/bash airflow || true
+
+# Install necessary dependencies for Spark
+RUN apt-get update && \
+    apt-get install -y \
+        net-tools \
+        procps \
+        scala \
+        openssh-server \
+        openssh-client && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Setup Spark
+ENV SPARK_VERSION=3.4.4
+ENV HADOOP_VERSION=3
+
+# Download and setup Spark
+COPY downloads/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz /tmp/
+RUN tar -xzf /tmp/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz -C /opt/ && \
+    mv /opt/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION} /opt/spark && \
+    rm /tmp/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz
+
+# Set Spark environment variables
+ENV SPARK_HOME=/opt/spark
+ENV PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin
+ENV PYTHONPATH=$SPARK_HOME/python:$SPARK_HOME/python/lib/py4j-0.10.9.5-src.zip
+
+# Add JDK 17 compatibility flags for Spark
+ENV SPARK_JAVA_OPTS="--add-opens=java.base/java.lang=ALL-UNNAMED \
+    --add-opens=java.base/java.util=ALL-UNNAMED \
+    --add-opens=java.base/java.io=ALL-UNNAMED \
+    --add-opens=java.base/java.nio=ALL-UNNAMED \
+    --add-opens=java.base/java.net=ALL-UNNAMED \
+    --add-opens=java.base/java.util.concurrent=ALL-UNNAMED \
+    --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED \
+    --add-opens=java.base/java.math=ALL-UNNAMED \
+    --add-exports=java.base/sun.nio.ch=ALL-UNNAMED \
+    --add-exports=java.base/sun.security.action=ALL-UNNAMED"
+
+# Create necessary directories with correct permissions
+RUN mkdir -p /opt/spark/logs && \
+    mkdir -p /opt/spark/work && \
+    mkdir -p /opt/spark/conf && \
+    mkdir -p /home/airflow/.ssh && \
+    mkdir -p /root/.ssh
+
+# Copy configurations first
+COPY spark/spark-defaults.conf /opt/spark/conf/
+COPY spark/spark-env.sh /opt/spark/conf/
+COPY spark/entrypoint.sh /spark-entrypoint.sh
+COPY spark/combined-entrypoint.sh /combined-entrypoint.sh
+
+# Add JDK 17 flags to spark-env.sh
+RUN echo "export SPARK_JAVA_OPTS=\"${SPARK_JAVA_OPTS}\"" >> /opt/spark/conf/spark-env.sh
+
+# Replace the single RUN command with multiple commands
+RUN chmod +x /spark-entrypoint.sh
+RUN chmod +x /combined-entrypoint.sh
+RUN chmod 644 /opt/spark/conf/spark-defaults.conf
+RUN chmod 755 /opt/spark/conf/spark-env.sh
+RUN chown -R airflow:0 /opt/spark
+RUN chmod -R g+rw /opt/spark
+RUN mkdir -p /home/airflow/.ssh && chmod 700 /home/airflow/.ssh
+RUN chown -R airflow:airflow /home/airflow/.ssh
+RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
+RUN chown -R root:root /root/.ssh
+
+EXPOSE 4040 7077 8080 8081
+
+# Update Hadoop env
+RUN echo "export SPARK_HOME=/opt/spark" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh && \
+    echo "export PATH=\$PATH:\$SPARK_HOME/bin:\$SPARK_HOME/sbin" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh && \
+    chown -R airflow:0 ${HADOOP_HOME} && \
+    chmod -R g+rw ${HADOOP_HOME}
+
+WORKDIR /opt/airflow
+
+USER airflow
+
+RUN pip install --no-cache-dir \
+    pyspark==${SPARK_VERSION} \
+    apache-airflow-providers-apache-spark \
+    apache-airflow-providers-openlineage>=2.1.0 --upgrade
+
+ENTRYPOINT ["/combined-entrypoint.sh"]

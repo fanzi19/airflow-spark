@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: data-platform
+
+configMapGenerator:
+  - name: hadoop-config
+    files:
+    - hadoop-config/core-site.xml
+    - hadoop-config/hdfs-site.xml
+    - hadoop-config/yarn-site.xml
+    - hadoop-config/capacity-scheduler.xml
+    - hadoop-config/dynamic-resources.xml
+    - hadoop-config/resource-types.xml
+    - hadoop-config/mapred-site.xml
+    - hadoop-config/log4j.properties
+    - bootstrap.sh 
+ 
+  - name: spark-config
+    files:
+    - spark-config/spark-defaults.conf
+    - spark-config/spark-env.sh
+    - spark-config/fairscheduler.xml
+    - spark-config/combined-entrypoint.sh
+
+  - name: hadoop-env
+    envs:
+    - hadoop.env
+ 
+resources:
+  - namespaces/data-platform.yaml
+  - storage/volumes.yaml
+  - deployments/postgres.yaml
+  - deployments/airflow.yaml
+  - deployments/hadoop.yaml
+  - deployments/spark.yaml
+  - services/postgres.yaml
+  - services/airflow.yaml
+  - services/hadoop.yaml
+  - services/spark.yaml

@@ -1,0 +1,62 @@
+FROM apache/airflow:2.7.1
+
+USER root
+
+# Install OpenJDK and other dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        openjdk-11-jdk \
+        python3-pip \
+        curl \
+        wget \
+        procps \
+        libsnappy-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set JAVA_HOME
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-arm64
+ENV PATH=$PATH:$JAVA_HOME/bin
+
+# Install Hadoop - Fixed directory creation and permissions
+ENV HADOOP_VERSION=3.2.1
+ENV HADOOP_HOME=/opt/hadoop
+ENV HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
+ENV PATH=$PATH:$HADOOP_HOME/bin
+
+# Create Hadoop directories first
+RUN mkdir -p /opt/hadoop \
+    && wget https://archive.apache.org/dist/hadoop/common/hadoop-${HADOOP_VERSION}/hadoop-${HADOOP_VERSION}.tar.gz \
+    && tar -xzf hadoop-${HADOOP_VERSION}.tar.gz -C /opt \
+    && mv /opt/hadoop-${HADOOP_VERSION}/* /opt/hadoop/ \
+    && rm hadoop-${HADOOP_VERSION}.tar.gz \
+    && mkdir -p ${HADOOP_HOME}/logs \
+    && mkdir -p ${HADOOP_CONF_DIR} \
+    && chown -R airflow:root /opt/hadoop \
+    && chmod -R 775 /opt/hadoop
+
+USER airflow
+
+# Install required Python packages
+RUN pip install --no-cache-dir \
+    apache-airflow-providers-apache-spark==4.1.5 \
+    apache-airflow-providers-apache-hadoop==4.1.1 \
+    pyspark==3.4.1 \
+    psycopg2-binary \
+    pandas \
+    pyarrow
+
+# Set Spark environment variables
+ENV SPARK_HOME=/home/airflow/.local/lib/python3.8/site-packages/pyspark
+ENV PATH=$PATH:$SPARK_HOME/bin
+ENV PYTHONPATH=$SPARK_HOME/python:$SPARK_HOME/python/lib/py4j-0.10.9.5-src.zip:$PYTHONPATH
+ENV PYSPARK_PYTHON=/usr/local/bin/python
+ENV PYSPARK_DRIVER_PYTHON=/usr/local/bin/python
+
+# Create necessary Airflow directories
+RUN mkdir -p ${AIRFLOW_HOME}/dags \
+    && mkdir -p ${AIRFLOW_HOME}/logs \
+    && mkdir -p ${AIRFLOW_HOME}/plugins
+
+# Explicitly disable OpenLineage
+ENV AIRFLOW__OPENLINEAGE__DISABLED=True

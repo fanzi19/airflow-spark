@@ -1,0 +1,345 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: namenode
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: namenode
+  template:
+    metadata:
+      labels:
+        app: namenode
+    spec:
+      securityContext:
+        fsGroup: 0
+        runAsUser: 0
+      initContainers:
+      - name: config-init
+        image: airflow-spark:latest
+        imagePullPolicy: Never
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+          echo "Copying configuration files..."
+          # Create target directory
+          mkdir -p /config-rw
+          
+          # Copy files with cp instead of symbolic links
+          for file in /config-mount/*; do
+            if [ -f "$file" ]; then
+              echo "Copying $file to /config-rw/"
+              cp "$file" /config-rw/
+            fi
+          done
+          
+          # Verify files
+          echo "Listing copied files:"
+          ls -la /config-rw/
+          
+          echo "Content of core-site.xml:"
+          cat /config-rw/core-site.xml
+          
+          # Set permissions
+          chmod -R 755 /config-rw/
+          chown -R root:root /config-rw/
+        volumeMounts:
+        - mountPath: /config-mount
+          name: hadoop-config-ro
+        - mountPath: /config-rw
+          name: hadoop-config-rw
+      containers:
+        - name: namenode
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash"]
+          args:
+          - -c
+          - |
+            set -ex
+            echo "Checking configuration files..."
+            ls -la /opt/hadoop/etc/hadoop/
+            echo "Content of core-site.xml:"
+            cat /opt/hadoop/etc/hadoop/core-site.xml
+            echo "Starting namenode..."
+            /bootstrap.sh namenode
+          ports:
+            - containerPort: 9870
+            - containerPort: 9000
+          env:
+            - name: HADOOP_CONF_DIR
+              value: /opt/hadoop/etc/hadoop
+            - name: SERVICE_TYPE
+              value: hadoop
+            - name: HADOOP_HOME
+              value: /opt/hadoop
+            - name: HDFS_NAMENODE_USER
+              value: root
+            - name: HDFS_DATANODE_USER
+              value: root
+            - name: HDFS_SECONDARYNAMENODE_USER
+              value: root
+            - name: YARN_RESOURCEMANAGER_USER
+              value: root
+            - name: YARN_NODEMANAGER_USER
+              value: root
+          envFrom:
+            - configMapRef:
+                name: hadoop-env
+          volumeMounts:
+            - name: hadoop-config-rw
+              mountPath: /opt/hadoop/etc/hadoop
+            - name: hadoop-namenode-storage
+              mountPath: /opt/hadoop/dfs/name
+            - name: hadoop-logs
+              mountPath: /opt/hadoop/logs
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 9870
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+      volumes:
+        - name: hadoop-namenode-storage
+          persistentVolumeClaim:
+            claimName: hadoop-namenode
+        - name: hadoop-logs
+          persistentVolumeClaim:
+            claimName: hadoop-logs
+        - name: hadoop-config-ro      # This name must match
+          configMap:
+            name: hadoop-config    # This is your ConfigMap name
+        - name: hadoop-config-rw
+          emptyDir: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: datanode
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: datanode
+  template:
+    metadata:
+      labels:
+        app: datanode
+    spec:
+      securityContext:
+        runAsUser: 0
+        fsGroup: 0
+      containers:
+        - name: datanode
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash"]
+          args: ["-c", "/bootstrap.sh datanode"]
+          env:
+            - name: SERVICE_TYPE
+              value: hadoop
+            - name: HADOOP_HOME
+              value: /opt/hadoop
+            - name: HDFS_DATANODE_USER  # This is needed
+              value: root
+          envFrom:
+            - configMapRef:
+                name: hadoop-env
+          volumeMounts:
+            - name: hadoop-config
+              mountPath: /opt/hadoop/etc/hadoop
+            - name: hadoop-datanode-storage
+              mountPath: /opt/hadoop/dfs/data
+      volumes:
+        - name: hadoop-datanode-storage
+          persistentVolumeClaim:
+            claimName: hadoop-datanode
+        - name: hadoop-config      # This name must match
+          configMap:
+            name: hadoop-config    # This is your ConfigMap name
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resourcemanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: resourcemanager
+  template:
+    metadata:
+      labels:
+        app: resourcemanager
+    spec:
+      securityContext:
+        runAsUser: 0
+        fsGroup: 0
+      containers:
+        - name: resourcemanager
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash"]
+          args:
+            - "-c"
+            - >
+              export JAVA_TOOL_OPTIONS="--add-opens=java.base/java.lang=ALL-UNNAMED
+              --add-opens=java.base/java.util=ALL-UNNAMED
+              --add-opens=java.base/java.nio=ALL-UNNAMED
+              --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+              --add-opens=java.base/java.security=ALL-UNNAMED
+              --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+              --add-opens=java.base/java.net=ALL-UNNAMED" &&
+              export YARN_RESOURCEMANAGER_OPTS="$JAVA_TOOL_OPTIONS" &&
+              /bootstrap.sh resourcemanager
+          ports:
+            - containerPort: 8088
+              name: web
+            - containerPort: 8030
+              name: scheduler
+            - containerPort: 8031
+              name: tracker
+            - containerPort: 8032
+              name: admin
+          env:
+            - name: SERVICE_TYPE
+              value: hadoop
+            - name: HADOOP_HOME
+              value: /opt/hadoop
+            - name: YARN_RESOURCEMANAGER_USER  # This is needed
+              value: root
+            - name: HADOOP_OPTS
+              value: "--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.security=ALL-UNNAMED"
+          envFrom:
+            - configMapRef:
+                name: hadoop-env
+          volumeMounts:
+            - name: hadoop-config
+              mountPath: /opt/hadoop/etc/hadoop
+            - name: hadoop-logs
+              mountPath: /opt/hadoop/logs
+      volumes:
+        - name: hadoop-logs
+          persistentVolumeClaim:
+            claimName: hadoop-logs
+        - name: hadoop-config      # This name must match
+          configMap:
+            name: hadoop-config    # This is your ConfigMap name
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nodemanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nodemanager
+  template:
+    metadata:
+      labels:
+        app: nodemanager
+    spec:
+      securityContext:
+        runAsUser: 0
+        fsGroup: 0
+      containers:
+        - name: nodemanager
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash"]
+          args:
+          - -c
+          - |
+            export JAVA_TOOL_OPTIONS="--add-opens=java.base/java.lang=ALL-UNNAMED \
+            --add-opens=java.base/java.util=ALL-UNNAMED \
+            --add-opens=java.base/java.nio=ALL-UNNAMED" &&
+            /bootstrap.sh nodemanager
+          env:
+            - name: SERVICE_TYPE
+              value: hadoop
+            - name: HADOOP_HOME
+              value: /opt/hadoop
+            - name: YARN_RESOURCEMANAGER_USER  # This is needed
+              value: root
+          envFrom:
+            - configMapRef:
+                name: hadoop-env
+          volumeMounts:
+            - name: hadoop-config
+              mountPath: /opt/hadoop/etc/hadoop
+            - name: hadoop-logs
+              mountPath: /opt/hadoop/logs
+      volumes:
+        - name: hadoop-logs
+          persistentVolumeClaim:
+            claimName: hadoop-logs
+        - name: hadoop-config      # This name must match
+          configMap:
+            name: hadoop-config    # This is your ConfigMap name
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: historyserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: historyserver
+  template:
+    metadata:
+      labels:
+        app: historyserver
+    spec:
+      securityContext:
+        runAsUser: 0
+        fsGroup: 0
+      containers:
+        - name: historyserver
+          image: airflow-spark:latest
+          imagePullPolicy: Never
+          command: ["/bin/bash"]
+          args:
+          - -c
+          - |
+            export JAVA_TOOL_OPTIONS="--add-opens=java.base/java.lang=ALL-UNNAMED \
+            --add-opens=java.base/java.util=ALL-UNNAMED \
+            --add-opens=java.base/java.nio=ALL-UNNAMED" &&
+            /bootstrap.sh historyserver
+          ports:
+            - containerPort: 8188
+              name: web
+            - containerPort: 8190
+              name: https
+          env:
+            - name: SERVICE_TYPE
+              value: hadoop
+            - name: HADOOP_HOME
+              value: /opt/hadoop
+            - name: YARN_TIMELINE_SERVICE_HOSTNAME
+              value: historyserver
+          envFrom:
+            - configMapRef:
+                name: hadoop-env
+          volumeMounts:
+            - name: hadoop-config
+              mountPath: /opt/hadoop/etc/hadoop
+            - name: hadoop-historyserver
+              mountPath: /opt/hadoop/logs/userlogs
+      volumes:
+        - name: hadoop-historyserver
+          persistentVolumeClaim:
+            claimName: hadoop-historyserver
+        - name: hadoop-config      # This name must match
+          configMap:
+            name: hadoop-config    # This is your ConfigMap name

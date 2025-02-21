@@ -1,0 +1,13 @@
+# Ignore download directory
+downloads/
+downloads/*.tar.gz
+downloads/*.tgz
+
+# Other common ignores
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.env
+!.env.template
+.DS_Store

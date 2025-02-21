@@ -1,0 +1,10 @@
+# k8s/network-policies/default.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-network-policy
+spec:
+  podSelector: {}
+  ingress:
+    - from:
+        - podSelector: {}
