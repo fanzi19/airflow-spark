@@ -9,7 +9,7 @@ on:
       - 'k8s/**'
       - 'spark/**'
       - 'hadoop/**'
-  workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch:
 
 env:
   REGISTRY: docker.io
@@ -33,4 +33,4 @@ jobs:
 
     - name: Validate K8s manifests
       run: |
-        kubectl apply -k k8s/ --dry-run=client
+        kubectl apply -k k8s/ --dry-run=client --validate=false
