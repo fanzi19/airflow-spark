@@ -23,7 +23,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    # Remove kubectl setup since we're just checking YAML syntax
     - name: Install yamllint
       run: |
         sudo apt-get install yamllint
@@ -37,3 +36,23 @@ jobs:
             yamllint -d relaxed "$file" || echo "Warning: Issues found in $file"
           fi
         done
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install test dependencies
+      run: |
+        pip install pytest pytest-cov apache-airflow
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.REGISTRY_USERNAME }}
+        password: ${{ secrets.REGISTRY_PASSWORD }}
+
+    - name: Validate DAGs
+      if: hashFiles('dags/tests/**/*.py') != ''
+      run: |
+        python -m pytest dags/tests/ -v
