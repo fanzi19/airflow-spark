@@ -1,4 +1,36 @@
-name: CI/CD Pipeline
+name: K8s Data Pipeline CI/CD
+
 on:
   push:
-    branches: []  # Empty array means no branches will trigger this
+    branches: [ main ]
+    paths:
+      - 'dags/**'
+      - 'docker/**'
+      - 'k8s/**'
+      - 'spark/**'
+      - 'hadoop/**'
+  workflow_dispatch:  # Allows manual trigger
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ secrets.REGISTRY_USERNAME }}/airflow-spark
+  IMAGE_TAG: ${{ github.sha }}
+  K8S_NAMESPACE: data-platform
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBE_CONFIG }}" > kubeconfig
+        export KUBECONFIG=kubeconfig
+
+    - name: Validate K8s manifests
+      run: |
+        kubectl apply -k k8s/ --dry-run=client
