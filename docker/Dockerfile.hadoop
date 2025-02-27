@@ -13,22 +13,33 @@ RUN apt-get update \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Create hadoop user and group
+RUN groupadd -r hadoop && useradd -r -g hadoop -d /home/hadoop -m hadoop \
+    && echo "hadoop ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/hadoop
+
 # Set Hadoop environment variables
 ENV HADOOP_VERSION=3.4.1
 ENV HADOOP_HOME=/opt/hadoop
 ENV PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin
 ENV HADOOP_CONF_DIR=/opt/hadoop/etc/hadoop
-ENV HDFS_NAMENODE_USER=root
-ENV HDFS_DATANODE_USER=root
-ENV HDFS_SECONDARYNAMENODE_USER=root
-ENV YARN_RESOURCEMANAGER_USER=root
-ENV YARN_NODEMANAGER_USER=root
+ENV HDFS_NAMENODE_USER=hadoop
+ENV HDFS_DATANODE_USER=hadoop
+ENV HDFS_SECONDARYNAMENODE_USER=hadoop
+ENV YARN_RESOURCEMANAGER_USER=hadoop
+ENV YARN_NODEMANAGER_USER=hadoop
 
-# Setup SSH
+# Setup SSH with more secure defaults
 RUN mkdir -p /var/run/sshd \
-    && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config \
     && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
-    && mkdir -p /root/.ssh
+    && sed -i 's/PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config \
+    && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+
+# Set up SSH for hadoop user
+RUN mkdir -p /home/hadoop/.ssh \
+    && ssh-keygen -t rsa -P "" -f /home/hadoop/.ssh/id_rsa \
+    && cat /home/hadoop/.ssh/id_rsa.pub > /home/hadoop/.ssh/authorized_keys \
+    && chmod 600 /home/hadoop/.ssh/authorized_keys \
+    && chown -R hadoop:hadoop /home/hadoop/.ssh
 
 # Copy and extract Hadoop
 COPY downloads/hadoop-${HADOOP_VERSION}.tar.gz /tmp/
@@ -40,10 +51,10 @@ RUN tar -xzf /tmp/hadoop-${HADOOP_VERSION}.tar.gz -C /opt/ \
 RUN mkdir -p $HADOOP_HOME/dfs/name \
     && mkdir -p $HADOOP_HOME/dfs/data \
     && mkdir -p $HADOOP_HOME/logs \
-    && chown -R root:root $HADOOP_HOME \
-    && chmod -R 755 $HADOOP_HOME \
-    && chmod 777 $HADOOP_HOME/dfs/data \
-    && chmod 777 $HADOOP_HOME/dfs/name
+    && chown -R hadoop:hadoop $HADOOP_HOME \
+    && chmod -R 750 $HADOOP_HOME \
+    && chmod 770 $HADOOP_HOME/dfs/data \
+    && chmod 770 $HADOOP_HOME/dfs/name
 
 # Copy Hadoop configuration files
 COPY hadoop/hadoop-config/* $HADOOP_HOME/etc/hadoop/
@@ -66,10 +77,14 @@ RUN echo "export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64" >> ${HADOOP_HOME}
 # Add HADOOP_OPTS to enable JDK 17 compatibility
 RUN echo "export HADOOP_OPTS=\"\$HADOOP_OPTS \$JAVA_OPTS\"" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh
 
-# Copy bootstrap script
+# Copy bootstrap script and make it executable
 COPY hadoop/bootstrap.sh /bootstrap.sh
-RUN chmod +x /bootstrap.sh
+RUN chmod +x /bootstrap.sh \
+    && chown hadoop:hadoop /bootstrap.sh
 
 EXPOSE 9870 9000 8088 22
+
+# Switch to hadoop user for container runtime
+USER hadoop
 
 ENTRYPOINT ["/bootstrap.sh"]
