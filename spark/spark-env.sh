@@ -44,23 +44,27 @@ if [ ! -f "$SPARK_AUTH_SECRET_FILE" ]; then
   chown hadoop:hadoop "$SPARK_AUTH_SECRET_FILE"
 fi
 
-# Enable event logging for audit purposes
-export SPARK_HISTORY_OPTS="$SPARK_HISTORY_OPTS -Dspark.history.fs.logDirectory=hdfs://namenode:9000/spark-logs"
+# Export secret for spark-defaults.conf
+export SPARK_AUTH_SECRET_FILE_CONTENTS=$(cat "$SPARK_AUTH_SECRET_FILE")
+
+# Create Java security policy file
+cat > /opt/spark/conf/spark.policy << EOF
+grant {
+  permission java.io.FilePermission "<<ALL FILES>>", "read,write,delete,execute";
+  permission java.lang.RuntimePermission "*";
+  permission java.util.PropertyPermission "*", "read,write";
+  permission java.net.SocketPermission "*", "connect,accept,resolve";
+};
+EOF
+chmod 644 /opt/spark/conf/spark.policy
+
+# Create HDFS directory for Spark logs
+hadoop fs -mkdir -p /spark-logs
+hadoop fs -chmod -R 755 /spark-logs
+hadoop fs -chown -R hadoop:hadoop /spark-logs
 
 # Set proper umask for better file permissions
 umask 027
-
-# Additional security options
-export SPARK_DAEMON_JAVA_OPTS="$SPARK_DAEMON_JAVA_OPTS \
-  -Djava.security.properties=/opt/spark/conf/java.security \
-  -Djava.io.tmpdir=/opt/spark/tmp \
-  -Dspark.authenticate=true \
-  -Dspark.ui.filters=org.apache.spark.ui.filters.SecurityFilter \
-  -Dspark.acls.enable=true \
-  -Dspark.admin.acls=hadoop,airflow \
-  -Dspark.modify.acls=hadoop,airflow \
-  -Dspark.ui.filters.enabled=true \
-  -Dspark.ssl.enabled=false"
 
 # Create necessary directories with proper permissions
 mkdir -p /opt/spark/tmp
