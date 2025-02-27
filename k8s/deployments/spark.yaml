@@ -1,36 +1,3 @@
-# Create a dedicated ServiceAccount
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: spark-sa
-  namespace: data-platform
----
-# Create Role for Spark
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: spark-role
-  namespace: data-platform
-rules:
-- apiGroups: [""]
-  resources: ["pods", "services"]
-  verbs: ["get", "list"]
----
-# Create RoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: spark-role-binding
-  namespace: data-platform
-subjects:
-- kind: ServiceAccount
-  name: spark-sa
-  namespace: data-platform
-roleRef:
-  kind: Role
-  name: spark-role
-  apiGroup: rbac.authorization.k8s.io
----
 # Spark Master Deployment
 apiVersion: apps/v1
 kind: Deployment
