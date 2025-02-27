@@ -1,7 +1,46 @@
+# Create a dedicated ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hadoop-sa
+  namespace: data-platform
+---
+# RBAC Role with minimal permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hadoop-role
+  namespace: data-platform
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+---
+# RoleBinding to associate the role with the service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hadoop-role-binding
+  namespace: data-platform
+subjects:
+- kind: ServiceAccount
+  name: hadoop-sa
+  namespace: data-platform
+roleRef:
+  kind: Role
+  name: hadoop-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# NameNode Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: namenode
+  namespace: data-platform
+  labels:
+    app: namenode
+    app.kubernetes.io/component: hadoop
+    app.kubernetes.io/part-of: data-platform
 spec:
   replicas: 1
   selector:
@@ -11,14 +50,29 @@ spec:
     metadata:
       labels:
         app: namenode
+        app.kubernetes.io/component: hadoop
+        app.kubernetes.io/part-of: data-platform
     spec:
+      serviceAccountName: hadoop-sa
+      # Pod security context - use non-root user
       securityContext:
-        fsGroup: 0
-        runAsUser: 0
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
       initContainers:
       - name: config-init
-        image: airflow-spark:latest
-        imagePullPolicy: Never
+        image: airflow-spark:1.0.0
+        imagePullPolicy: IfNotPresent
+        # Container security context
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          runAsGroup: 1000
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
         command:
         - sh
         - -c
@@ -28,47 +82,50 @@ spec:
           # Create target directory
           mkdir -p /config-rw
           
-          # Copy files with cp instead of symbolic links
-          for file in /config-mount/*; do
-            if [ -f "$file" ]; then
-              echo "Copying $file to /config-rw/"
-              cp "$file" /config-rw/
-            fi
-          done
+          # Copy files
+          cp -r /config-mount/* /config-rw/
           
-          # Verify files
-          echo "Listing copied files:"
-          ls -la /config-rw/
-          
-          echo "Content of core-site.xml:"
-          cat /config-rw/core-site.xml
-          
-          # Set permissions
+          # Set correct permissions for Hadoop to run as non-root
           chmod -R 755 /config-rw/
-          chown -R root:root /config-rw/
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
         volumeMounts:
         - mountPath: /config-mount
           name: hadoop-config-ro
+          readOnly: true
         - mountPath: /config-rw
           name: hadoop-config-rw
       containers:
         - name: namenode
-          image: airflow-spark:latest
-          imagePullPolicy: Never
+          image: airflow-spark:1.0.0
+          imagePullPolicy: IfNotPresent
+          # Container security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: false
           command: ["/bin/bash"]
           args:
           - -c
           - |
             set -ex
-            echo "Checking configuration files..."
-            ls -la /opt/hadoop/etc/hadoop/
-            echo "Content of core-site.xml:"
-            cat /opt/hadoop/etc/hadoop/core-site.xml
-            echo "Starting namenode..."
+            echo "Starting namenode with secure configuration..."
+            # Modify bootstrap.sh to run as non-root (assuming your bootstrap.sh supports it)
             /bootstrap.sh namenode
           ports:
             - containerPort: 9870
+              name: http
             - containerPort: 9000
+              name: rpc
           env:
             - name: HADOOP_CONF_DIR
               value: /opt/hadoop/etc/hadoop
@@ -76,19 +133,32 @@ spec:
               value: hadoop
             - name: HADOOP_HOME
               value: /opt/hadoop
+            # Use non-root users for Hadoop services
             - name: HDFS_NAMENODE_USER
-              value: root
+              value: hdfs
             - name: HDFS_DATANODE_USER
-              value: root
+              value: hdfs
             - name: HDFS_SECONDARYNAMENODE_USER
-              value: root
+              value: hdfs
             - name: YARN_RESOURCEMANAGER_USER
-              value: root
+              value: yarn
             - name: YARN_NODEMANAGER_USER
-              value: root
+              value: yarn
+            # Security settings
+            - name: HADOOP_OPTS
+              value: "-Djava.security.properties=/opt/hadoop/etc/hadoop/java.security"
+            - name: HADOOP_SECURE_LOG_DIR
+              value: /opt/hadoop/logs
           envFrom:
             - configMapRef:
                 name: hadoop-env
+          resources:
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+            requests:
+              cpu: "1"
+              memory: "2Gi"
           volumeMounts:
             - name: hadoop-config-rw
               mountPath: /opt/hadoop/etc/hadoop
@@ -99,11 +169,20 @@ spec:
           livenessProbe:
             httpGet:
               path: /
-              port: 9870
-            initialDelaySeconds: 30
+              port: http
+            initialDelaySeconds: 90
             periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
             timeoutSeconds: 10
             failureThreshold: 3
+            successThreshold: 1
       volumes:
         - name: hadoop-namenode-storage
           persistentVolumeClaim:
@@ -111,17 +190,25 @@ spec:
         - name: hadoop-logs
           persistentVolumeClaim:
             claimName: hadoop-logs
-        - name: hadoop-config-ro      # This name must match
+        - name: hadoop-config-ro
           configMap:
-            name: hadoop-config    # This is your ConfigMap name
+            name: hadoop-config
+            defaultMode: 0440 # Read-only for owner and group
         - name: hadoop-config-rw
-          emptyDir: {}
-
+          emptyDir:
+            medium: Memory # Use memory for better security
+            sizeLimit: 20Mi
 ---
+# DataNode Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: datanode
+  namespace: data-platform
+  labels:
+    app: datanode
+    app.kubernetes.io/component: hadoop
+    app.kubernetes.io/part-of: data-platform
 spec:
   replicas: 1
   selector:
@@ -131,44 +218,130 @@ spec:
     metadata:
       labels:
         app: datanode
+        app.kubernetes.io/component: hadoop
+        app.kubernetes.io/part-of: data-platform
     spec:
+      serviceAccountName: hadoop-sa
+      # Pod security context
       securityContext:
-        runAsUser: 0
-        fsGroup: 0
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: config-init
+        image: airflow-spark:1.0.0
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          runAsGroup: 1000
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+          echo "Copying configuration files..."
+          mkdir -p /config-rw
+          cp -r /config-mount/* /config-rw/
+          chmod -R 755 /config-rw/
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+        volumeMounts:
+        - mountPath: /config-mount
+          name: hadoop-config-ro
+          readOnly: true
+        - mountPath: /config-rw
+          name: hadoop-config-rw
       containers:
         - name: datanode
-          image: airflow-spark:latest
-          imagePullPolicy: Never
+          image: airflow-spark:1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: false
           command: ["/bin/bash"]
           args: ["-c", "/bootstrap.sh datanode"]
+          ports:
+            - containerPort: 9864
+              name: http
+            - containerPort: 9866
+              name: data
           env:
             - name: SERVICE_TYPE
               value: hadoop
             - name: HADOOP_HOME
               value: /opt/hadoop
-            - name: HDFS_DATANODE_USER  # This is needed
-              value: root
+            - name: HDFS_DATANODE_USER
+              value: hdfs
+            - name: HADOOP_CONF_DIR
+              value: /opt/hadoop/etc/hadoop
+            - name: HADOOP_OPTS
+              value: "-Djava.security.properties=/opt/hadoop/etc/hadoop/java.security"
           envFrom:
             - configMapRef:
                 name: hadoop-env
+          resources:
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+            requests:
+              cpu: "1"
+              memory: "2Gi"
           volumeMounts:
-            - name: hadoop-config
+            - name: hadoop-config-rw
               mountPath: /opt/hadoop/etc/hadoop
             - name: hadoop-datanode-storage
               mountPath: /opt/hadoop/dfs/data
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 15
       volumes:
         - name: hadoop-datanode-storage
           persistentVolumeClaim:
             claimName: hadoop-datanode
-        - name: hadoop-config      # This name must match
+        - name: hadoop-config-ro
           configMap:
-            name: hadoop-config    # This is your ConfigMap name
-
+            name: hadoop-config
+            defaultMode: 0440
+        - name: hadoop-config-rw
+          emptyDir:
+            medium: Memory
+            sizeLimit: 20Mi
 ---
+# ResourceManager Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: resourcemanager
+  namespace: data-platform
+  labels:
+    app: resourcemanager
+    app.kubernetes.io/component: hadoop
+    app.kubernetes.io/part-of: data-platform
 spec:
   replicas: 1
   selector:
@@ -178,14 +351,61 @@ spec:
     metadata:
       labels:
         app: resourcemanager
+        app.kubernetes.io/component: hadoop
+        app.kubernetes.io/part-of: data-platform
     spec:
+      serviceAccountName: hadoop-sa
       securityContext:
-        runAsUser: 0
-        fsGroup: 0
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: config-init
+        image: airflow-spark:1.0.0
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          runAsGroup: 1000
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+          echo "Copying configuration files..."
+          mkdir -p /config-rw
+          cp -r /config-mount/* /config-rw/
+          chmod -R 755 /config-rw/
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+        volumeMounts:
+        - mountPath: /config-mount
+          name: hadoop-config-ro
+          readOnly: true
+        - mountPath: /config-rw
+          name: hadoop-config-rw
       containers:
         - name: resourcemanager
-          image: airflow-spark:latest
-          imagePullPolicy: Never
+          image: airflow-spark:1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: false
           command: ["/bin/bash"]
           args:
             - "-c"
@@ -213,31 +433,64 @@ spec:
               value: hadoop
             - name: HADOOP_HOME
               value: /opt/hadoop
-            - name: YARN_RESOURCEMANAGER_USER  # This is needed
-              value: root
+            - name: YARN_RESOURCEMANAGER_USER
+              value: yarn
+            - name: HADOOP_CONF_DIR
+              value: /opt/hadoop/etc/hadoop
             - name: HADOOP_OPTS
-              value: "--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.security=ALL-UNNAMED"
+              value: "--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.security=ALL-UNNAMED -Djava.security.properties=/opt/hadoop/etc/hadoop/java.security"
+            - name: YARN_SECURE_LOG_DIR
+              value: /opt/hadoop/logs
           envFrom:
             - configMapRef:
                 name: hadoop-env
+          resources:
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+            requests:
+              cpu: "1"
+              memory: "2Gi"
           volumeMounts:
-            - name: hadoop-config
+            - name: hadoop-config-rw
               mountPath: /opt/hadoop/etc/hadoop
             - name: hadoop-logs
               mountPath: /opt/hadoop/logs
+          livenessProbe:
+            httpGet:
+              path: /ws/v1/cluster/info
+              port: web
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ws/v1/cluster/info
+              port: web
+            initialDelaySeconds: 60
+            periodSeconds: 15
       volumes:
         - name: hadoop-logs
           persistentVolumeClaim:
             claimName: hadoop-logs
-        - name: hadoop-config      # This name must match
+        - name: hadoop-config-ro
           configMap:
-            name: hadoop-config    # This is your ConfigMap name
-
+            name: hadoop-config
+            defaultMode: 0440
+        - name: hadoop-config-rw
+          emptyDir:
+            medium: Memory
+            sizeLimit: 20Mi
 ---
+# NodeManager Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: nodemanager
+  namespace: data-platform
+  labels:
+    app: nodemanager
+    app.kubernetes.io/component: hadoop
+    app.kubernetes.io/part-of: data-platform
 spec:
   replicas: 1
   selector:
@@ -247,14 +500,61 @@ spec:
     metadata:
       labels:
         app: nodemanager
+        app.kubernetes.io/component: hadoop
+        app.kubernetes.io/part-of: data-platform
     spec:
+      serviceAccountName: hadoop-sa
       securityContext:
-        runAsUser: 0
-        fsGroup: 0
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: config-init
+        image: airflow-spark:1.0.0
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          runAsGroup: 1000
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+          echo "Copying configuration files..."
+          mkdir -p /config-rw
+          cp -r /config-mount/* /config-rw/
+          chmod -R 755 /config-rw/
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+        volumeMounts:
+        - mountPath: /config-mount
+          name: hadoop-config-ro
+          readOnly: true
+        - mountPath: /config-rw
+          name: hadoop-config-rw
       containers:
         - name: nodemanager
-          image: airflow-spark:latest
-          imagePullPolicy: Never
+          image: airflow-spark:1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: false
           command: ["/bin/bash"]
           args:
           - -c
@@ -263,34 +563,70 @@ spec:
             --add-opens=java.base/java.util=ALL-UNNAMED \
             --add-opens=java.base/java.nio=ALL-UNNAMED" &&
             /bootstrap.sh nodemanager
+          ports:
+            - containerPort: 8042
+              name: web
           env:
             - name: SERVICE_TYPE
               value: hadoop
             - name: HADOOP_HOME
               value: /opt/hadoop
-            - name: YARN_RESOURCEMANAGER_USER  # This is needed
-              value: root
+            - name: YARN_NODEMANAGER_USER
+              value: yarn
+            - name: HADOOP_CONF_DIR
+              value: /opt/hadoop/etc/hadoop
+            - name: HADOOP_OPTS
+              value: "-Djava.security.properties=/opt/hadoop/etc/hadoop/java.security"
           envFrom:
             - configMapRef:
                 name: hadoop-env
+          resources:
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+            requests:
+              cpu: "1"
+              memory: "2Gi"
           volumeMounts:
-            - name: hadoop-config
+            - name: hadoop-config-rw
               mountPath: /opt/hadoop/etc/hadoop
             - name: hadoop-logs
               mountPath: /opt/hadoop/logs
+          livenessProbe:
+            httpGet:
+              path: /node
+              port: web
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /node
+              port: web
+            initialDelaySeconds: 60
+            periodSeconds: 15
       volumes:
         - name: hadoop-logs
           persistentVolumeClaim:
             claimName: hadoop-logs
-        - name: hadoop-config      # This name must match
+        - name: hadoop-config-ro
           configMap:
-            name: hadoop-config    # This is your ConfigMap name
-
+            name: hadoop-config
+            defaultMode: 0440
+        - name: hadoop-config-rw
+          emptyDir:
+            medium: Memory
+            sizeLimit: 20Mi
 ---
+# HistoryServer Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: historyserver
+  namespace: data-platform
+  labels:
+    app: historyserver
+    app.kubernetes.io/component: hadoop
+    app.kubernetes.io/part-of: data-platform
 spec:
   replicas: 1
   selector:
@@ -300,14 +636,61 @@ spec:
     metadata:
       labels:
         app: historyserver
+        app.kubernetes.io/component: hadoop
+        app.kubernetes.io/part-of: data-platform
     spec:
+      serviceAccountName: hadoop-sa
       securityContext:
-        runAsUser: 0
-        fsGroup: 0
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: config-init
+        image: airflow-spark:1.0.0
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+          runAsGroup: 1000
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: false
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+          echo "Copying configuration files..."
+          mkdir -p /config-rw
+          cp -r /config-mount/* /config-rw/
+          chmod -R 755 /config-rw/
+        resources:
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+        volumeMounts:
+        - mountPath: /config-mount
+          name: hadoop-config-ro
+          readOnly: true
+        - mountPath: /config-rw
+          name: hadoop-config-rw
       containers:
         - name: historyserver
-          image: airflow-spark:latest
-          imagePullPolicy: Never
+          image: airflow-spark:1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1000
+            runAsGroup: 1000
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: false
           command: ["/bin/bash"]
           args:
           - -c
@@ -328,18 +711,91 @@ spec:
               value: /opt/hadoop
             - name: YARN_TIMELINE_SERVICE_HOSTNAME
               value: historyserver
+            - name: HADOOP_CONF_DIR
+              value: /opt/hadoop/etc/hadoop
+            - name: HADOOP_OPTS
+              value: "-Djava.security.properties=/opt/hadoop/etc/hadoop/java.security"
           envFrom:
             - configMapRef:
                 name: hadoop-env
+          resources:
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
           volumeMounts:
-            - name: hadoop-config
+            - name: hadoop-config-rw
               mountPath: /opt/hadoop/etc/hadoop
             - name: hadoop-historyserver
               mountPath: /opt/hadoop/logs/userlogs
+          livenessProbe:
+            httpGet:
+              path: /ws/v1/timeline/
+              port: web
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ws/v1/timeline/
+              port: web
+            initialDelaySeconds: 60
+            periodSeconds: 15
       volumes:
         - name: hadoop-historyserver
           persistentVolumeClaim:
             claimName: hadoop-historyserver
-        - name: hadoop-config      # This name must match
+        - name: hadoop-config-ro
           configMap:
-            name: hadoop-config    # This is your ConfigMap name
+            name: hadoop-config
+            defaultMode: 0440
+        - name: hadoop-config-rw
+          emptyDir:
+            medium: Memory
+            sizeLimit: 20Mi
+---
+# NetworkPolicy for Hadoop components
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hadoop-network-policy
+  namespace: data-platform
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: hadoop
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: data-platform
+    ports:
+    - protocol: TCP
+      port: 9000  # NameNode RPC
+    - protocol: TCP
+      port: 9864  # DataNode HTTP
+    - protocol: TCP
+      port: 9866  # DataNode Data transfer
+    - protocol: TCP
+      port: 9870  # NameNode HTTP
+    - protocol: TCP
+      port: 8030  # ResourceManager scheduler
+    - protocol: TCP
+      port: 8031  # ResourceManager tracker
+    - protocol: TCP
+      port: 8032  # ResourceManager admin
+    - protocol: TCP
+      port: 8042  # NodeManager
+    - protocol: TCP
+      port: 8088  # ResourceManager web UI
+    - protocol: TCP
+      port: 8188  # Timeline server
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: data-platform
