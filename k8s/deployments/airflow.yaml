@@ -1,22 +1,3 @@
-# Create ServiceAccount
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: airflow-account
-  namespace: data-platform
----
-# Create Secret for credentials
-apiVersion: v1
-kind: Secret
-metadata:
-  name: airflow-secrets
-  namespace: data-platform
-type: Opaque
-data:
-  admin-password: UGFzc3dvcmQxMjM=  # Base64 encoded secure password (not "admin")
-  db-connection: cG9zdGdyZXNxbCtwc3ljb3BnMjovL2FpcmZsb3c6JHtEQl9QQVNTV09SRH1AcG9zdGdyZXMvYWlyZmxvdw==  # Base64 encoded connection string
-  db-password: c2VjdXJlUGFzc3dvcmQxMjM=  # Base64 encoded database password
----
 # Airflow Webserver Deployment
 apiVersion: apps/v1
 kind: Deployment
@@ -226,31 +207,3 @@ spec:
         - name: spark-tests
           configMap:
             name: spark-tests
----
-# Network Policy for Airflow
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: airflow-network-policy
-  namespace: data-platform
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/part-of: data-platform
-  policyTypes:
-  - Ingress
-  ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          app.kubernetes.io/part-of: data-platform
-    ports:
-    - protocol: TCP
-      port: 8080
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          name: ingress-nginx
-    ports:
-    - protocol: TCP
-      port: 8080
