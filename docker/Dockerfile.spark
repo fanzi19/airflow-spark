@@ -2,18 +2,16 @@ FROM airflow-hadoop:latest
 
 USER root
 
-# Create airflow user and group first
-RUN groupadd -g 50000 airflow || true && \
-    useradd -u 50000 -g airflow -d /home/airflow -m -s /bin/bash airflow || true
+# Create airflow user and group with specific UID/GID
+# Note: The airflow user is already in the base image, but we ensure consistent UID/GID
+RUN groupadd -g 50000 airflow 2>/dev/null || groupmod -g 50000 airflow && \
+    useradd -u 50000 -g airflow -d /home/airflow -m -s /bin/bash airflow 2>/dev/null || usermod -u 50000 -g airflow airflow
 
-# Install necessary dependencies for Spark
+# Install only necessary dependencies that aren't in previous images
 RUN apt-get update && \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
         net-tools \
-        procps \
-        scala \
-        openssh-server \
-        openssh-client && \
+        scala && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -44,13 +42,6 @@ ENV SPARK_JAVA_OPTS="--add-opens=java.base/java.lang=ALL-UNNAMED \
     --add-exports=java.base/sun.nio.ch=ALL-UNNAMED \
     --add-exports=java.base/sun.security.action=ALL-UNNAMED"
 
-# Create necessary directories with correct permissions
-RUN mkdir -p /opt/spark/logs && \
-    mkdir -p /opt/spark/work && \
-    mkdir -p /opt/spark/conf && \
-    mkdir -p /home/airflow/.ssh && \
-    mkdir -p /root/.ssh
-
 # Copy configurations first
 COPY spark/spark-defaults.conf /opt/spark/conf/
 COPY spark/spark-env.sh /opt/spark/conf/
@@ -60,25 +51,23 @@ COPY spark/combined-entrypoint.sh /combined-entrypoint.sh
 # Add JDK 17 flags to spark-env.sh
 RUN echo "export SPARK_JAVA_OPTS=\"${SPARK_JAVA_OPTS}\"" >> /opt/spark/conf/spark-env.sh
 
-# Replace the single RUN command with multiple commands
-RUN chmod +x /spark-entrypoint.sh
-RUN chmod +x /combined-entrypoint.sh
-RUN chmod 644 /opt/spark/conf/spark-defaults.conf
-RUN chmod 755 /opt/spark/conf/spark-env.sh
-RUN chown -R airflow:0 /opt/spark
-RUN chmod -R g+rw /opt/spark
-RUN mkdir -p /home/airflow/.ssh && chmod 700 /home/airflow/.ssh
-RUN chown -R airflow:airflow /home/airflow/.ssh
-RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh
-RUN chown -R root:root /root/.ssh
+# Create necessary directories and set appropriate permissions
+# Combining multiple RUN commands to reduce layers
+RUN mkdir -p /opt/spark/logs /opt/spark/work && \
+    chmod +x /spark-entrypoint.sh /combined-entrypoint.sh && \
+    chmod 644 /opt/spark/conf/spark-defaults.conf && \
+    chmod 755 /opt/spark/conf/spark-env.sh && \
+    # Update Hadoop env
+    echo "export SPARK_HOME=/opt/spark" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh && \
+    echo "export PATH=\$PATH:\$SPARK_HOME/bin:\$SPARK_HOME/sbin" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh && \
+    # Set proper ownership for all directories
+    chown -R airflow:airflow /opt/spark && \
+    chown -R airflow:airflow ${HADOOP_HOME} && \
+    # No need to create .ssh directories as they're handled in the hadoop image
+    # Set appropriate permissions (more restrictive)
+    chmod -R 750 /opt/spark /opt/hadoop
 
 EXPOSE 4040 7077 8080 8081
-
-# Update Hadoop env
-RUN echo "export SPARK_HOME=/opt/spark" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh && \
-    echo "export PATH=\$PATH:\$SPARK_HOME/bin:\$SPARK_HOME/sbin" >> ${HADOOP_HOME}/etc/hadoop/hadoop-env.sh && \
-    chown -R airflow:0 ${HADOOP_HOME} && \
-    chmod -R g+rw ${HADOOP_HOME}
 
 WORKDIR /opt/airflow
 
