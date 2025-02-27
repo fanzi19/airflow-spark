@@ -6,6 +6,9 @@
         <name>dfs.replication</name>
         <value>1</value>
     </property>
+    
+    <!-- Binding properties - keep but document the security implications -->
+    <!-- Security Note: These 0.0.0.0 bindings should be restricted in production environments -->
     <property>
         <name>dfs.namenode.rpc-bind-host</name>
         <value>0.0.0.0</value>
@@ -31,7 +34,7 @@
         <value>0.0.0.0:9867</value>
     </property>
 
-    <!-- New properties to fix connectivity -->
+    <!-- Hostname check properties -->
     <property>
         <name>dfs.namenode.datanode.registration.ip-hostname-check</name>
         <value>false</value>
@@ -52,16 +55,85 @@
         <name>dfs.domain.socket.path</name>
         <value>/var/run/hadoop-hdfs/dn._PORT</value>
     </property>
+    
+    <!-- CRITICAL SECURITY CHANGE: Enable permissions -->
     <property>
         <name>dfs.permissions.enabled</name>
-        <value>false</value>
+        <value>true</value>
     </property>
+    
+    <!-- Storage directories -->
     <property>
         <name>dfs.namenode.name.dir</name>
-        <value>/opt/hadoop/dfs/name</value>
+        <value>file:///opt/hadoop/dfs/name</value>
     </property>
     <property>
         <name>dfs.datanode.data.dir</name>
-        <value>/opt/hadoop/dfs/data</value>
+        <value>file:///opt/hadoop/dfs/data</value>
+    </property>
+    
+    <!-- Added security properties -->
+    <!-- Set Hadoop user as superuser -->
+    <property>
+        <name>dfs.permissions.superusergroup</name>
+        <value>hadoop</value>
+    </property>
+    
+    <!-- Set umask to more restrictive -->
+    <property>
+        <name>fs.permissions.umask-mode</name>
+        <value>027</value>
+    </property>
+    
+    <!-- Configure HDFS trash to prevent accidental data loss -->
+    <property>
+        <name>fs.trash.interval</name>
+        <value>1440</value>
+    </property>
+    <property>
+        <name>fs.trash.checkpoint.interval</name>
+        <value>120</value>
+    </property>
+    
+    <!-- Block access tokens for secure operations -->
+    <property>
+        <name>dfs.block.access.token.enable</name>
+        <value>true</value>
+    </property>
+    
+    <!-- Enable WebHDFS with secure mode -->
+    <property>
+        <name>dfs.webhdfs.enabled</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>dfs.web.authentication.kerberos.principal</name>
+        <value>HTTP/_HOST@REALM</value>
+    </property>
+    
+    <!-- Enable delegation tokens -->
+    <property>
+        <name>dfs.namenode.delegation.token.max-lifetime</name>
+        <value>604800000</value> <!-- 7 days -->
+    </property>
+    <property>
+        <name>dfs.namenode.delegation.token.renew-interval</name>
+        <value>86400000</value> <!-- 1 day -->
+    </property>
+    
+    <!-- Enable auditing -->
+    <property>
+        <name>dfs.namenode.audit.log.async</name>
+        <value>true</value>
+    </property>
+    
+    <!-- Configure user directories to be created with appropriate permissions -->
+    <property>
+        <name>dfs.namenode.acls.enabled</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>dfs.permissions.allow.owner.set.quota</name>
+        <value>true</value>
     </property>
 </configuration>
