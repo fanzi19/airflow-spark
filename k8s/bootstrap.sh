@@ -7,15 +7,15 @@ log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1"
 }
 
-# Configure SSH
-if [ ! -f "/root/.ssh/id_rsa" ]; then
-    ssh-keygen -t rsa -P '' -f /root/.ssh/id_rsa
-    cat /root/.ssh/id_rsa.pub >> /root/.ssh/authorized_keys
-    chmod 0600 /root/.ssh/authorized_keys
-fi
+# Configure SSH for the hadoop user
+if [ ! -f "/home/hadoop/.ssh/id_rsa" ]; then
+    sudo -u hadoop ssh-keygen -t rsa -P '' -f /home/hadoop/.ssh/id_rsa
+    sudo -u hadoop cat /home/hadoop/.ssh/id_rsa.pub >> /home/hadoop/.ssh/authorized_keys
+    sudo -u hadoop chmod 0600 /home/hadoop/.ssh/authorized_keys
+}
 
-# Start SSH daemon
-/usr/sbin/sshd
+# Start SSH daemon with sudo
+sudo /usr/sbin/sshd
 
 # Function to wait for service
 wait_for_it() {
@@ -43,14 +43,12 @@ wait_for_it() {
 start_namenode() {
     log "Starting NameNode..."
     
-    # Set proper permissions
-    chown -R root:root $HADOOP_HOME
-    chmod -R 755 $HADOOP_HOME
+    # Ensure proper ownership
+    sudo chown -R hadoop:hadoop $HADOOP_HOME
     
     # Create necessary directories with proper permissions
-    mkdir -p $HADOOP_HOME/dfs/name
-    chown -R root:root $HADOOP_HOME/dfs/name
-    chmod -R 755 $HADOOP_HOME/dfs/name
+    sudo mkdir -p $HADOOP_HOME/dfs/name
+    sudo chown -R hadoop:hadoop $HADOOP_HOME/dfs/name
     
     # Format namenode if necessary
     if [ ! -d "$HADOOP_HOME/dfs/name/current" ]; then
@@ -68,10 +66,9 @@ start_datanode() {
     log "Waiting for NameNode..."
     wait_for_it namenode 9000
     
-    # Set proper permissions
-    mkdir -p $HADOOP_HOME/dfs/data
-    chown -R root:root $HADOOP_HOME/dfs/data
-    chmod -R 755 $HADOOP_HOME/dfs/data
+    # Ensure proper ownership
+    sudo mkdir -p $HADOOP_HOME/dfs/data
+    sudo chown -R hadoop:hadoop $HADOOP_HOME/dfs/data
     
     log "Starting DataNode..."
     exec $HADOOP_HOME/bin/hdfs --config $HADOOP_HOME/etc/hadoop datanode
