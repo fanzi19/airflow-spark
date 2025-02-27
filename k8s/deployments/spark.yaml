@@ -1,7 +1,46 @@
+# Create a dedicated ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: spark-sa
+  namespace: data-platform
+---
+# Create Role for Spark
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-role
+  namespace: data-platform
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services"]
+  verbs: ["get", "list"]
+---
+# Create RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-role-binding
+  namespace: data-platform
+subjects:
+- kind: ServiceAccount
+  name: spark-sa
+  namespace: data-platform
+roleRef:
+  kind: Role
+  name: spark-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# Spark Master Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: spark-master
+  namespace: data-platform
+  labels:
+    app: spark-master
+    app.kubernetes.io/component: spark
+    app.kubernetes.io/part-of: data-platform
 spec:
   replicas: 1
   selector:
@@ -11,14 +50,30 @@ spec:
     metadata:
       labels:
         app: spark-master
+        app.kubernetes.io/component: spark
+        app.kubernetes.io/part-of: data-platform
+      annotations:
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
     spec:
+      serviceAccountName: spark-sa
       hostname: spark-master
+      # Pod security context
       securityContext:
         runAsUser: 50000
+        runAsGroup: 50000
+        fsGroup: 50000
+        runAsNonRoot: true
       containers:
         - name: spark-master
-          image: airflow-spark:latest
-          imagePullPolicy: Never
+          image: airflow-spark:1.0.0  # Use specific version
+          imagePullPolicy: IfNotPresent  # Changed from Never
+          # Container security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # Need write access for logs
+            capabilities:
+              drop:
+              - ALL
           ports:
             - containerPort: 7077
               name: master-port
@@ -26,60 +81,103 @@ spec:
               name: master-ui
             - containerPort: 4040
               name: app-ui-1
-            - containerPort: 4041
-              name: app-ui-2
-            - containerPort: 4042
-              name: app-ui-3
-            - containerPort: 4043
-              name: app-ui-4
-            - containerPort: 4044
-              name: app-ui-5
-            - containerPort: 4045
-              name: app-ui-6
           env:
             - name: SPARK_MODE
               value: master
             - name: SPARK_LOG_DIR
               value: /opt/spark/logs
+            - name: SPARK_MASTER_HOST
+              value: spark-master
+            - name: SPARK_MASTER_PORT
+              value: "7077"
+            - name: SPARK_MASTER_WEBUI_PORT
+              value: "8080"
+            # Security related settings
+            - name: SPARK_AUTH_ENABLED
+              value: "true"
+            - name: SPARK_SSL_ENABLED
+              value: "true"
+            - name: SPARK_SSL_KEYSTORE
+              value: "/opt/spark/conf/ssl/keystore.jks"
+            - name: SPARK_SSL_KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spark-secrets
+                  key: keystore-password
+            - name: SPARK_SSL_TRUSTSTORE
+              value: "/opt/spark/conf/ssl/truststore.jks"
+            - name: SPARK_SSL_TRUSTSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spark-secrets
+                  key: truststore-password
+            - name: SPARK_SSL_PROTOCOL
+              value: "TLSv1.2"
+            - name: SPARK_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: spark-secrets
+                  key: auth-secret
           envFrom:
             - configMapRef:
                 name: hadoop-env
+          # Resource limits
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
           volumeMounts:
             - name: spark-logs
               mountPath: /opt/spark/logs
             - name: spark-config
               mountPath: /opt/spark/conf
+              readOnly: true
+            - name: spark-ssl
+              mountPath: /opt/spark/conf/ssl
+              readOnly: true
+            - name: tmp-dir
+              mountPath: /tmp
           command: ["/bin/bash"]
           args:
           - "-c"
           - |
-            rm -f /opt/spark/logs/* &&
-            SPARK_MASTER_HOST=spark-master \
-            SPARK_MASTER_PORT=7077 \
-            SPARK_MASTER_WEBUI_PORT=8080 \
-            /opt/spark/sbin/start-master.sh &&
+            set -e
+            
+            # Create clean log directory with proper permissions
+            mkdir -p /opt/spark/logs
+            rm -f /opt/spark/logs/* 
+            chmod 750 /opt/spark/logs
+            
+            # Start Spark master with security settings
+            /opt/spark/sbin/start-master.sh
+            
+            # Monitor the logs
             tail -f /opt/spark/logs/*
+          # Improved probes
+          startupProbe:
+            tcpSocket:
+              port: master-port
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
           livenessProbe:
-            exec:
-              command:
-                - nc
-                - -z
-                - localhost
-                - "7077"
-            initialDelaySeconds: 30
+            tcpSocket:
+              port: master-port
+            initialDelaySeconds: 60
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
           readinessProbe:
-            exec:
-              command:
-                - nc
-                - -z
-                - localhost
-                - "7077"
+            httpGet:
+              path: /
+              port: master-ui
+              scheme: HTTPS
             initialDelaySeconds: 30
-            periodSeconds: 30
-            timeoutSeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 3
       volumes:
         - name: spark-logs
@@ -88,11 +186,26 @@ spec:
         - name: spark-config
           configMap:
             name: spark-config
+            defaultMode: 0440  # Read-only mode
+        - name: spark-ssl
+          secret:
+            secretName: spark-ssl-certificates
+            defaultMode: 0440  # Read-only mode 
+        - name: tmp-dir
+          emptyDir:
+            medium: Memory  # Use RAM for temporary files
+            sizeLimit: 100Mi
 ---
+# Spark Worker Deployment
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: spark-worker
+  namespace: data-platform
+  labels:
+    app: spark-worker
+    app.kubernetes.io/component: spark
+    app.kubernetes.io/part-of: data-platform
 spec:
   replicas: 1
   selector:
@@ -102,17 +215,35 @@ spec:
     metadata:
       labels:
         app: spark-worker
+        app.kubernetes.io/component: spark
+        app.kubernetes.io/part-of: data-platform
+      annotations:
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
     spec:
+      serviceAccountName: spark-sa
       hostname: spark-worker
+      # Pod security context
       securityContext:
-        runAsUser: 50000 
+        runAsUser: 50000
+        runAsGroup: 50000
+        fsGroup: 50000
+        runAsNonRoot: true
       containers:
         - name: spark-worker
-          image: airflow-spark:latest
-          imagePullPolicy: Never
+          image: airflow-spark:1.0.0
+          imagePullPolicy: IfNotPresent
+          # Container security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+              - ALL
           ports:
-            - containerPort: 8083  # Worker UI port
-            - containerPort: 8082  # Worker port
+            - containerPort: 8083
+              name: worker-ui
+            - containerPort: 8082
+              name: worker-port
           env:
             - name: SPARK_WORKER_CORES
               value: "2"
@@ -122,6 +253,49 @@ spec:
               value: "spark-worker"
             - name: SPARK_LOG_DIR
               value: /opt/spark/logs
+            - name: SPARK_WORKER_PORT
+              value: "8082"
+            - name: SPARK_WORKER_WEBUI_PORT
+              value: "8083"
+            # Security related settings
+            - name: SPARK_AUTH_ENABLED
+              value: "true"
+            - name: SPARK_SSL_ENABLED
+              value: "true"
+            - name: SPARK_SSL_KEYSTORE
+              value: "/opt/spark/conf/ssl/keystore.jks"
+            - name: SPARK_SSL_KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spark-secrets
+                  key: keystore-password
+            - name: SPARK_SSL_TRUSTSTORE
+              value: "/opt/spark/conf/ssl/truststore.jks"
+            - name: SPARK_SSL_TRUSTSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: spark-secrets
+                  key: truststore-password
+            - name: SPARK_SSL_PROTOCOL
+              value: "TLSv1.2"
+            - name: SPARK_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: spark-secrets
+                  key: auth-secret
+            - name: SPARK_WORKER_OPTS
+              value: "-Dspark.worker.cleanup.enabled=true -Dspark.worker.cleanup.interval=1800 -Dspark.worker.cleanup.appDataTtl=604800"
+          envFrom:
+            - configMapRef:
+                name: hadoop-env
+          # Resource limits
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
           volumeMounts:
             - name: spark-logs
               mountPath: /opt/spark/logs
@@ -129,21 +303,70 @@ spec:
               mountPath: /opt/spark/work-dir
             - name: spark-config
               mountPath: /opt/spark/conf
+              readOnly: true
+            - name: spark-ssl
+              mountPath: /opt/spark/conf/ssl
+              readOnly: true
+            - name: tmp-dir
+              mountPath: /tmp
           command: ["/bin/bash"]
           args:
           - "-c"
           - |
-            mkdir -p /opt/spark/work-dir &&
-            SPARK_WORKER_PORT=8082 \
-            SPARK_WORKER_WEBUI_PORT=8083 \
-            /opt/spark/sbin/start-worker.sh spark://spark-master:7077 &&
+            set -e
+            
+            # Create directories with proper permissions
+            mkdir -p /opt/spark/logs
+            mkdir -p /opt/spark/work-dir
+            chmod 750 /opt/spark/logs
+            chmod 750 /opt/spark/work-dir
+            
+            # Start worker with security settings
+            /opt/spark/sbin/start-worker.sh spark://spark-master:7077
+            
+            # Monitor the logs
             tail -f /opt/spark/logs/*
+          # Health checks
+          startupProbe:
+            httpGet:
+              path: /
+              port: worker-ui
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: worker-port
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: worker-ui
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
       volumes:
         - name: spark-logs
           persistentVolumeClaim:
             claimName: spark-logs
         - name: spark-work-dir
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 10Gi  # Limit the size of work directory
         - name: spark-config
           configMap:
             name: spark-config
+            defaultMode: 0440
+        - name: spark-ssl
+          secret:
+            secretName: spark-ssl-certificates
+            defaultMode: 0440
+        - name: tmp-dir
+          emptyDir:
+            medium: Memory
+            sizeLimit: 200Mi
