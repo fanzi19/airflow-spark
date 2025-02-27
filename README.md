@@ -59,6 +59,49 @@ kubectl get pods
 kubectl logs -f deployment/airflow-webserver
 ```
 
+## Prerequisites for Building Docker Images
+
+### Required Downloads
+
+Before building the Docker images, you need to download specific versions of Hadoop and Spark. This approach speeds up the build process and allows for offline builds.
+
+1. Create a `downloads` directory in the project root:
+   ```bash
+   mkdir -p downloads
+   ```
+
+2. Download the required distribution files:
+   ```bash
+   # Download Hadoop
+   wget -P downloads https://downloads.apache.org/hadoop/common/hadoop-3.4.1/hadoop-3.4.1.tar.gz
+   
+   # Download Spark
+   wget -P downloads https://downloads.apache.org/spark/spark-3.4.4/spark-3.4.4-bin-hadoop3.tgz
+   ```
+
+3. Verify files are in place:
+   ```bash
+   ls -la downloads/
+   # Should show:
+   # hadoop-3.4.1.tar.gz
+   # spark-3.4.4-bin-hadoop3.tgz
+   ```
+
+The Dockerfiles are configured to copy these files from the `downloads` directory during the build process, as shown in this example:
+
+```dockerfile
+# Copy and extract Hadoop
+COPY downloads/hadoop-${HADOOP_VERSION}.tar.gz /tmp/
+RUN tar -xzf /tmp/hadoop-${HADOOP_VERSION}.tar.gz -C /opt/ \
+    && ln -s /opt/hadoop-${HADOOP_VERSION} ${HADOOP_HOME} \
+    && rm /tmp/hadoop-${HADOOP_VERSION}.tar.gz
+```
+
+This approach:
+- Reduces build time by avoiding repeated downloads
+- Enables building in environments without internet access
+- Ensures consistent builds with specific versions
+
 ## Configuration
 
 ### Hadoop Configuration
@@ -83,7 +126,7 @@ Place your Airflow DAGs in the `dags/` directory. They will be automatically loa
 2. Once tested, use the same DAGs and configurations in the Kubernetes environment
 3. CI/CD pipelines in `.github/workflows/` automate testing and deployment
 
-## Prerequisites
+## Additional Prerequisites
 
 ### For Docker Deployment
 - Docker and Docker Compose
@@ -102,5 +145,6 @@ Common issues:
 - **Services fail to start**: Check Docker logs and ensure sufficient resources
 - **Connectivity issues**: Verify network settings in docker-compose.yml
 - **Kubernetes pods pending**: Check PVC provisioning and resource quotas
+- **Build failures**: Ensure the required distribution files are properly downloaded in the `downloads` directory
 
 For more detailed troubleshooting, refer to the logs of the specific component.
