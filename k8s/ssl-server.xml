@@ -1,0 +1,22 @@
+<configuration>
+  <property>
+    <name>ssl.server.keystore.location</name>
+    <value>/etc/security/server.keystore</value>
+  </property>
+  <property>
+    <name>ssl.server.keystore.password</name>
+    <value>${ssl.server.keystore.password}</value>
+  </property>
+  <property>
+    <name>ssl.server.keystore.keypassword</name>
+    <value>${ssl.server.keystore.keypassword}</value>
+  </property>
+  <property>
+    <name>ssl.server.truststore.location</name>
+    <value>/etc/security/server.truststore</value>
+  </property>
+  <property>
+    <name>ssl.server.truststore.password</name>
+    <value>${ssl.server.truststore.password}</value>
+  </property>
+</configuration>
