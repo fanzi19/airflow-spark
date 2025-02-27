@@ -1,7 +1,33 @@
+# Create dedicated ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-sa
+  namespace: data-platform
+---
+# Create Secret for database credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: data-platform
+type: Opaque
+data:
+  # Base64 encoded values (use strong passwords in production)
+  POSTGRES_USER: YWlyZmxvdw==  # airflow
+  POSTGRES_PASSWORD: UGFzc3dvcmQxMjMhQCM=  # Password123!@#
+  POSTGRES_DB: YWlyZmxvdw==  # airflow
+---
+# PostgreSQL Deployment with security enhancements
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: postgres
+  namespace: data-platform
+  labels:
+    app: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: data-platform
 spec:
   replicas: 1
   selector:
@@ -11,34 +37,222 @@ spec:
     metadata:
       labels:
         app: postgres
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: data-platform
+      annotations:
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
     spec:
-      containers:
-        - name: postgres
+      serviceAccountName: postgres-sa
+      # Pod security context
+      securityContext:
+        fsGroup: 999  # postgres group
+        runAsNonRoot: true
+        runAsUser: 999  # postgres user
+        runAsGroup: 999
+      initContainers:
+        - name: init-permissions
           image: postgres:13
-          imagePullPolicy: Never
-          env:
-            - name: POSTGRES_USER
-              value: airflow
-            - name: POSTGRES_PASSWORD
-              value: airflow
-            - name: POSTGRES_DB
-              value: airflow
-          ports:
-            - containerPort: 5432
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 999:999 /var/lib/postgresql/data
+              chmod 700 /var/lib/postgresql/data
+          securityContext:
+            runAsUser: 0  # Temporarily run as root for permissions
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+          resources:
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
           volumeMounts:
             - name: postgres-storage
               mountPath: /var/lib/postgresql/data
-          livenessProbe:  # Equivalent to healthcheck
+      containers:
+        - name: postgres
+          image: postgres:13
+          imagePullPolicy: IfNotPresent
+          # Container security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 999  # postgres user
+            runAsGroup: 999
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - FOWNER
+                - SETGID
+                - SETUID
+            readOnlyRootFilesystem: false
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: POSTGRES_DB
+            # Security enhancements
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: scram-sha-256
+            - name: POSTGRES_INITDB_ARGS
+              value: "--auth-host=scram-sha-256 --auth-local=scram-sha-256 --data-checksums"
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+              name: postgres
+          # Resource limits
+          resources:
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+            - name: postgres-config
+              mountPath: /etc/postgresql/postgresql.conf
+              subPath: postgresql.conf
+              readOnly: true
+            - name: postgres-config
+              mountPath: /etc/postgresql/pg_hba.conf
+              subPath: pg_hba.conf
+              readOnly: true
+          # Health checks
+          startupProbe:
             exec:
               command:
                 - pg_isready
                 - -U
-                - airflow
-            initialDelaySeconds: 5
+                - postgres
+            initialDelaySeconds: 10
             periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
       volumes:
         - name: postgres-storage
           persistentVolumeClaim:
             claimName: postgres-data
-
+        - name: postgres-config
+          configMap:
+            name: postgres-config
+            defaultMode: 0440  # Read-only
+---
+# ConfigMap for PostgreSQL configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: data-platform
+data:
+  postgresql.conf: |
+    listen_addresses = '*'
+    max_connections = 100
+    shared_buffers = 256MB
+    # Security settings
+    ssl = on
+    ssl_cert_file = '/etc/ssl/certs/ssl-cert-snakeoil.pem'
+    ssl_key_file = '/etc/ssl/private/ssl-cert-snakeoil.key'
+    password_encryption = scram-sha-256
+    # Logging
+    log_destination = 'stderr'
+    logging_collector = on
+    log_directory = 'log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_statement = 'ddl'
+    log_min_error_statement = error
+    log_line_prefix = '%m [%p] %q%u@%d '
+    # Performance
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    # Miscellaneous
+    datestyle = 'iso, mdy'
+    timezone = 'UTC'
+    default_text_search_config = 'pg_catalog.english'
+    
+  pg_hba.conf: |
+    # TYPE  DATABASE        USER            ADDRESS                 METHOD
+    local   all             all                                     scram-sha-256
+    host    all             all             127.0.0.1/32            scram-sha-256
+    host    all             all             ::1/128                 scram-sha-256
+    hostssl all             all             all                     scram-sha-256
+---
+# Network Policy for PostgreSQL
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-network-policy
+  namespace: data-platform
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: data-platform
+    ports:
+    - protocol: TCP
+      port: 5432
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/part-of: data-platform
+    ports:
+    - protocol: TCP
+---
+# PodDisruptionBudget for availability
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres-pdb
+  namespace: data-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: postgres
