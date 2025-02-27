@@ -8,7 +8,6 @@ RUN apt-get update \
         openssh-server \
         openssh-client \
         netcat-openbsd \
-        curl \
         sudo \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
