@@ -1,0 +1,17 @@
+# Java Security Properties for Hadoop
+security.provider.1=sun.security.provider.Sun
+security.provider.2=sun.security.rsa.SunRsaSign
+security.provider.3=com.sun.net.ssl.internal.ssl.Provider
+security.provider.4=com.sun.crypto.provider.SunJCE
+security.provider.5=sun.security.jgss.SunProvider
+
+# Disable weak algorithms
+jdk.tls.disabledAlgorithms=SSLv3, TLSv1, TLSv1.1, RC4, DES, MD5withRSA, DH keySize < 1024, EC keySize < 224, 3DES_EDE_CBC, anon, NULL
+jdk.certpath.disabledAlgorithms=MD2, MD5, SHA1 jdkCA & usage TLSServer, RSA keySize < 2048
+jdk.tls.legacyAlgorithms=
+
+# Strong crypto settings
+crypto.policy=unlimited
+
+# Secure random settings
+securerandom.source=file:/dev/urandom
