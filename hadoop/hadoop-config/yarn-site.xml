@@ -1,10 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 <configuration>
+    <!-- Basic YARN configuration -->
     <property>
         <name>yarn.resourcemanager.hostname</name>
         <value>resourcemanager</value>
     </property>
+    
+    <!-- Binding properties - keep but document security implications -->
+    <!-- Security Note: These 0.0.0.0 bindings should be restricted in production environments -->
     <property>
         <name>yarn.resourcemanager.bind-host</name>
         <value>0.0.0.0</value>
@@ -13,10 +17,13 @@
         <name>yarn.nodemanager.bind-host</name>
         <value>0.0.0.0</value>
     </property>
+    
     <property>
         <name>yarn.nodemanager.aux-services</name>
         <value>mapreduce_shuffle</value>
     </property>
+    
+    <!-- Service addresses -->
     <property>
         <name>yarn.resourcemanager.address</name>
         <value>resourcemanager:8032</value>
@@ -32,5 +39,109 @@
     <property>
         <name>yarn.resourcemanager.webapp.address</name>
         <value>resourcemanager:8088</value>
+    </property>
+    
+    <!-- Added security properties -->
+    
+    <!-- Enable authentication -->
+    <property>
+        <name>yarn.acl.enable</name>
+        <value>true</value>
+    </property>
+    
+    <!-- Set admin ACL -->
+    <property>
+        <name>yarn.admin.acl</name>
+        <value>hadoop,airflow</value>
+    </property>
+    
+    <!-- Container executor settings -->
+    <property>
+        <name>yarn.nodemanager.container-executor.class</name>
+        <value>org.apache.hadoop.yarn.server.nodemanager.DefaultContainerExecutor</value>
+    </property>
+    
+    <!-- Linux container executor settings for better isolation -->
+    <property>
+        <name>yarn.nodemanager.linux-container-executor.group</name>
+        <value>hadoop</value>
+    </property>
+    
+    <!-- Enable log aggregation -->
+    <property>
+        <name>yarn.log-aggregation-enable</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>yarn.log-aggregation.retain-seconds</name>
+        <value>604800</value> <!-- 7 days -->
+    </property>
+    
+    <!-- Resource usage monitoring -->
+    <property>
+        <name>yarn.resourcemanager.system-metrics-publisher.enabled</name>
+        <value>true</value>
+    </property>
+    
+    <!-- Web UI security -->
+    <property>
+        <name>yarn.resourcemanager.webapp.https.enable</name>
+        <value>false</value> <!-- Consider changing to true for production with proper certificates -->
+    </property>
+    <property>
+        <name>yarn.nodemanager.webapp.https.enable</name>
+        <value>false</value> <!-- Consider changing to true for production with proper certificates -->
+    </property>
+    
+    <!-- Application master security -->
+    <property>
+        <name>yarn.resourcemanager.am.max-attempts</name>
+        <value>2</value> <!-- Limit retries to reduce impact of malicious apps -->
+    </property>
+    
+    <!-- Resource limits -->
+    <property>
+        <name>yarn.scheduler.minimum-allocation-mb</name>
+        <value>256</value>
+    </property>
+    <property>
+        <name>yarn.scheduler.maximum-allocation-mb</name>
+        <value>4096</value> <!-- Limit maximum resources an application can request -->
+    </property>
+    <property>
+        <name>yarn.scheduler.minimum-allocation-vcores</name>
+        <value>1</value>
+    </property>
+    <property>
+        <name>yarn.scheduler.maximum-allocation-vcores</name>
+        <value>4</value> <!-- Limit maximum CPU an application can request -->
+    </property>
+    
+    <!-- User limits -->
+    <property>
+        <name>yarn.scheduler.capacity.maximum-applications</name>
+        <value>10000</value>
+    </property>
+    <property>
+        <name>yarn.scheduler.capacity.maximum-am-resource-percent</name>
+        <value>0.1</value> <!-- Limit resource hogging by application masters -->
+    </property>
+    
+    <!-- Resource enforcement -->
+    <property>
+        <name>yarn.nodemanager.resource-plugins.gpu.path-to-discovery-executables</name>
+        <value>/usr/bin</value>
+    </property>
+    <property>
+        <name>yarn.nodemanager.pmem-check-enabled</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>yarn.nodemanager.vmem-check-enabled</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>yarn.nodemanager.vmem-pmem-ratio</name>
+        <value>2.1</value>
     </property>
 </configuration>
